@@ -74,6 +74,7 @@ enum {
     ARCH_MAC99,
     ARCH_HEATHROW,
     ARCH_MAC99_U3,
+    ARCH_POWERMAC7_3,
 };
 
 int is_apple(void)
@@ -89,7 +90,8 @@ int is_oldworld(void)
 int is_newworld(void)
 {
     return (machine_id == ARCH_MAC99) ||
-           (machine_id == ARCH_MAC99_U3);
+           (machine_id == ARCH_MAC99_U3) ||
+           (machine_id == ARCH_POWERMAC7_3);
 }
 
 #define CORE99_VIA_CONFIG_CUDA     0x0
@@ -154,6 +156,26 @@ static const pci_arch_t known_arch[] = {
     },
     [ARCH_MAC99_U3] = {
         .name = "MAC99_U3",
+        .vendor_id = PCI_VENDOR_ID_APPLE,
+        .device_id = PCI_DEVICE_ID_APPLE_U3_AGP,
+        .cfg_addr = 0xf0800000,
+        .cfg_data = 0xf0c00000,
+        .cfg_base = 0xf0000000,
+        .cfg_len = 0x02000000,
+        .host_pci_base = 0x0,
+        .pci_mem_base = 0x80000000,
+        .mem_len = 0x10000000,
+        .io_base = 0xf2000000,
+        .io_len = 0x00800000,
+        .host_ranges = {
+            { .type = IO_SPACE, .parentaddr = 0, .childaddr = 0xf2000000, .len = 0x00800000 },
+            { .type = MEMORY_SPACE_32, .parentaddr = 0x80000000, .childaddr = 0x80000000, .len = 0x10000000 },
+            { .type = 0, .parentaddr = 0, .childaddr = 0, .len = 0 }
+         },
+        .irqs = { 0x1b, 0x1c, 0x1d, 0x1e }
+    },
+    [ARCH_POWERMAC7_3] = {
+        .name = "POWERMAC7_3",
         .vendor_id = PCI_VENDOR_ID_APPLE,
         .device_id = PCI_DEVICE_ID_APPLE_U3_AGP,
         .cfg_addr = 0xf0800000,
@@ -420,6 +442,58 @@ ppc64_patch_handlers(void)
 #pragma GCC diagnostic pop
 #endif
 
+/* Make a plain dcbz clear 32 bytes, as on the PowerMac7,3: HID5 bit 56
+ * (DCBZ_size) set, bits 55 (dst_noop) and 57 (DCBZ32_ill) clear. On the
+ * 970, HID5 is SPR 1014, not S_HID5. A change to bit 56 or 57 needs sync;
+ * mtspr; isync, then a flush of the whole I-cache (970FX User's Manual
+ * v1.7, Table 2-5 and its Note 4, and 2.2.8.5). The write leaves HID5's
+ * other fields at 0, HRMOR (bits 32 to 47) among them, where QEMU resets
+ * them anyway.
+ *
+ * The flush sets HID1 bit 9 (en_icbi), so that an icbi invalidates every
+ * line it looks at, steps through the 64 KB I-cache's 512 congruence
+ * classes 128 bytes apart, and puts HID1 back (3.3.1). HID1 is written
+ * twice, as Note 2 asks. The bits are in IBM's 64-bit numbering, so
+ * en_icbi is in HID1's upper word. This 32-bit code keeps only the low
+ * word of a register it saves, so the saved HID1 has to stay in a register,
+ * in one asm statement. The DSI handler that an icbi can raise saves all
+ * 64 bits, once ppc64_patch_handlers has installed it, so this needs
+ * CONFIG_PPC_64BITSUPPORT too.
+ */
+#ifdef CONFIG_PPC_64BITSUPPORT
+static void
+cpu_970_set_dcbz32(void)
+{
+    asm volatile("sync\n\t"
+                 "mtspr " __stringify(S_970_HID5) ", %0\n\t"
+                 "isync"
+                 : : "r" (0x80) : "memory");
+
+    asm volatile(".machine push\n\t"
+                 ".machine ppc64\n\t"
+                 "mfspr 9, " __stringify(S_HID1) "\n\t"  /* r9 = HID1 */
+                 "li 10, 0x40\n\t"
+                 "sldi 10, 10, 48\n\t"        /* r10 = en_icbi, 1 << (63 - 9) */
+                 "or 10, 10, 9\n\t"
+                 "mtspr " __stringify(S_HID1) ", 10\n\t"
+                 "mtspr " __stringify(S_HID1) ", 10\n\t"
+                 "isync\n\t"
+                 "li 10, 0\n\t"
+                 "li 11, 512\n\t"
+                 "mtctr 11\n"
+                 "1:\ticbi 0, 10\n\t"
+                 "addi 10, 10, 128\n\t"
+                 "bdnz 1b\n\t"
+                 "sync\n\t"
+                 "isync\n\t"
+                 "mtspr " __stringify(S_HID1) ", 9\n\t"
+                 "mtspr " __stringify(S_HID1) ", 9\n\t"
+                 "isync\n\t"
+                 ".machine pop"
+                 : : : "r9", "r10", "r11", "ctr", "memory");
+}
+#endif
+
 static void
 cpu_970_init(const struct cpudef *cpu)
 {
@@ -448,6 +522,12 @@ cpu_970_init(const struct cpudef *cpu)
     /* The 970 also implements the HIOR which we need to set to 0 */
 
     mtspr(S_HIOR, 0);
+
+#ifdef CONFIG_PPC_64BITSUPPORT
+    if (machine_id == ARCH_POWERMAC7_3) {
+        cpu_970_set_dcbz32();
+    }
+#endif
 }
 
 static const struct cpudef ppc_defs[] = {
@@ -943,6 +1023,7 @@ arch_of_init(void)
     switch (machine_id) {
     case ARCH_MAC99:
     case ARCH_MAC99_U3:
+    case ARCH_POWERMAC7_3:
         /* The NewWorld NVRAM is not located in the MacIO device */
         macio_nvram_init("/", 0);
         ob_pci_init();
@@ -1017,6 +1098,37 @@ arch_of_init(void)
         fword("encode-int");
         push_str("AAPL,cpu-id");
         fword("property");
+
+        PUSH(fw_cfg_read_i32(FW_CFG_PPC_BUSFREQ));
+        fword("encode-int");
+        push_str("clock-frequency");
+        fword("property");
+        break;
+
+    case ARCH_POWERMAC7_3:
+
+        /* model */
+
+        push_str("PowerMac7,3");
+        fword("model");
+
+        /* compatible: the first entry names the platform */
+
+        push_str("PowerMac7,3");
+        fword("encode-string");
+        push_str("MacRISC4");
+        fword("encode-string");
+        fword("encode+");
+        push_str("Power Macintosh");
+        fword("encode-string");
+        fword("encode+");
+        push_str("compatible");
+        fword("property");
+
+        /* misc */
+
+        push_str("bootrom");
+        fword("device-type");
 
         PUSH(fw_cfg_read_i32(FW_CFG_PPC_BUSFREQ));
         fword("encode-int");
@@ -1099,6 +1211,7 @@ arch_of_init(void)
     switch (machine_id) {
     case ARCH_MAC99:
     case ARCH_MAC99_U3:
+    case ARCH_POWERMAC7_3:
         if (!(ph = find_dev("/rtas"))) {
             printk("Warning: No /rtas node\n");
         } else {
