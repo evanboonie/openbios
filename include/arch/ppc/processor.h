@@ -160,6 +160,7 @@
 #define S_HID5		1013
 #define S_DABR		S_HID5	/* HID5 - Data Address Breakpoint */
 #define S_MSSCR0	1014	/* HID6 - Memory Subsystem Control Register 0 */
+#define S_970_HID5	1014	/* 970: HID5, not S_HID5 */
 #define S_MSSCR1	1015	/* HID7 - Memory Subsystem Control Register 1 */
 #define S_LDSTCR	1016	/* HID8 - Load/Store Control Register */
 #define S_L2CR		1017	/* HID9 - Level 2 Cache Control Regsiter */
