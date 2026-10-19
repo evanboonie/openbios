@@ -446,7 +446,9 @@ ppc64_patch_handlers(void)
  * (DCBZ_size) set, bits 55 (dst_noop) and 57 (DCBZ32_ill) clear. On the
  * 970, HID5 is SPR 1014, not S_HID5. A change to bit 56 or 57 needs sync;
  * mtspr; isync, then a flush of the whole I-cache (970FX User's Manual
- * v1.7, Table 2-5 and its Note 4, and 2.2.8.5).
+ * v1.7, Table 2-5 and its Note 4, and 2.2.8.5). The write leaves HID5's
+ * other fields at 0, HRMOR (bits 32 to 47) among them, where QEMU resets
+ * them anyway.
  *
  * The flush sets HID1 bit 9 (en_icbi), so that an icbi invalidates every
  * line it looks at, steps through the 64 KB I-cache's 512 congruence
@@ -455,8 +457,10 @@ ppc64_patch_handlers(void)
  * en_icbi is in HID1's upper word. This 32-bit code keeps only the low
  * word of a register it saves, so the saved HID1 has to stay in a register,
  * in one asm statement. The DSI handler that an icbi can raise saves all
- * 64 bits (ppc64_patch_handlers).
+ * 64 bits, once ppc64_patch_handlers has installed it, so this needs
+ * CONFIG_PPC_64BITSUPPORT too.
  */
+#ifdef CONFIG_PPC_64BITSUPPORT
 static void
 cpu_970_set_dcbz32(void)
 {
@@ -488,6 +492,7 @@ cpu_970_set_dcbz32(void)
                  ".machine pop"
                  : : : "r9", "r10", "r11", "ctr", "memory");
 }
+#endif
 
 static void
 cpu_970_init(const struct cpudef *cpu)
@@ -518,9 +523,11 @@ cpu_970_init(const struct cpudef *cpu)
 
     mtspr(S_HIOR, 0);
 
+#ifdef CONFIG_PPC_64BITSUPPORT
     if (machine_id == ARCH_POWERMAC7_3) {
         cpu_970_set_dcbz32();
     }
+#endif
 }
 
 static const struct cpudef ppc_defs[] = {
