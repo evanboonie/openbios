@@ -998,6 +998,17 @@ ob_ide_software_reset(struct ide_drive *drive)
 {
 	struct ide_channel *chan = drive->channel;
 
+	/*
+	 * select the master first, so that the wait for BUSY clear below
+	 * reads its status. An absent slave's status reads 0 even while
+	 * the reset is pending, and the device select can't be written
+	 * once the reset has set BUSY.
+	 */
+	if (chan->drives[0].present) {
+		ob_ide_pio_writeb(drive, IDEREG_CURRENT, IDEHEAD_DEV0);
+		ob_ide_400ns_delay(drive);
+	}
+
 	ob_ide_pio_writeb(drive, IDEREG_CONTROL, IDECON_NIEN | IDECON_SRST);
 	ob_ide_400ns_delay(drive);
 	ob_ide_pio_writeb(drive, IDEREG_CONTROL, IDECON_NIEN);
