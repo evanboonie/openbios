@@ -167,12 +167,15 @@ openpic_init(const char *path, phys_addr_t addr)
         phandle_t dnode;
         int props[2];
         char buf[128];
+        /* The real PowerMac7,3 names its MPIC mpic, and Mac OS X's
+           MacRISC4PE looks it up as mac-io/mpic */
+        const char *name = is_powermac7_3() ? "mpic" : "interrupt-controller";
 
         fword("new-device");
-        push_str("interrupt-controller");
+        push_str(name);
         fword("device-name");
 
-        snprintf(buf, sizeof(buf), "%s/interrupt-controller", path);
+        snprintf(buf, sizeof(buf), "%s/%s", path, name);
         dnode = find_dev(buf);
         set_property(dnode, "device_type", "open-pic", 9);
         set_property(dnode, "compatible", "chrp,open-pic", 14);
@@ -267,13 +270,27 @@ ob_unin_init(void)
         int props[2];
 
         fword("new-device");
-        push_str("uni-n");
-        fword("device-name");
 
-        dnode = find_dev("/uni-n");
-        set_property(dnode, "device_type", "memory-controller", 18);
-        set_property(dnode, "compatible", "uni-north", 10);
-        set_int_property(dnode, "device-rev", 7);
+        if (is_powermac7_3()) {
+                /* The real PowerMac7,3's memory controller is U3, which Mac
+                   OS X's AppleU3 matches by name */
+                push_str("u3");
+                fword("device-name");
+
+                dnode = find_dev("/u3");
+                set_property(dnode, "device_type", "memory-controller", 18);
+                set_property(dnode, "compatible", "u3", 3);
+                set_property(dnode, "model", "AAPL,U3", 8);
+                set_int_property(dnode, "device-rev", 0x35);
+        } else {
+                push_str("uni-n");
+                fword("device-name");
+
+                dnode = find_dev("/uni-n");
+                set_property(dnode, "device_type", "memory-controller", 18);
+                set_property(dnode, "compatible", "uni-north", 10);
+                set_int_property(dnode, "device-rev", 7);
+        }
         props[0] = __cpu_to_be32(0xf8000000);
         props[1] = __cpu_to_be32(0x1000000);
         set_property(dnode, "reg", (char *)&props, sizeof(props));
