@@ -94,6 +94,11 @@ int is_newworld(void)
            (machine_id == ARCH_POWERMAC7_3);
 }
 
+int is_powermac7_3(void)
+{
+    return machine_id == ARCH_POWERMAC7_3;
+}
+
 #define CORE99_VIA_CONFIG_CUDA     0x0
 #define CORE99_VIA_CONFIG_PMU      0x1
 #define CORE99_VIA_CONFIG_PMU_ADB  0x2
@@ -185,10 +190,13 @@ static const pci_arch_t known_arch[] = {
         .host_pci_base = 0x0,
         .pci_mem_base = 0x80000000,
         .mem_len = 0x10000000,
-        .io_base = 0xf2000000,
+        /* The real PowerMac7,3's u3-agp maps PCI I/O 0 at 0xf0000000, and
+           Mac OS X's AGP bridge driver finds U3's config registers at that
+           base + 0x800000 */
+        .io_base = 0xf0000000,
         .io_len = 0x00800000,
         .host_ranges = {
-            { .type = IO_SPACE, .parentaddr = 0, .childaddr = 0xf2000000, .len = 0x00800000 },
+            { .type = IO_SPACE, .parentaddr = 0, .childaddr = 0xf0000000, .len = 0x00800000 },
             { .type = MEMORY_SPACE_32, .parentaddr = 0x80000000, .childaddr = 0x80000000, .len = 0x10000000 },
             { .type = 0, .parentaddr = 0, .childaddr = 0, .len = 0 }
          },
@@ -1205,6 +1213,16 @@ arch_of_init(void)
     snprintf(buf, sizeof(buf), "/cpus/%s", cpu->name);
     ofmem_register(find_dev("/memory"), find_dev(buf));
     node_methods_init(buf);
+
+    if (machine_id == ARCH_POWERMAC7_3) {
+        /* As on the real PowerMac7,3, the cpu node names its interrupt
+           controller, the MPIC, by phandle */
+        phandle_t mpic = dt_iterate_type(0, "open-pic");
+
+        if (mpic) {
+            set_int_property(find_dev(buf), "AAPL,parentIC", mpic);
+        }
+    }
 
 #ifdef CONFIG_RTAS
     /* OldWorld Macs don't have an /rtas node. */

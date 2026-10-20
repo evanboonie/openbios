@@ -23,6 +23,7 @@ int ob_pci_init(void);
 extern int is_apple(void);
 extern int is_oldworld(void);
 extern int is_newworld(void);
+extern int is_powermac7_3(void);
 extern int has_pmu(void);
 extern int has_adb(void);
 #else
@@ -35,6 +36,10 @@ static inline int is_oldworld(void)
 	return 0;
 }
 static inline int is_newworld(void)
+{
+	return 0;
+}
+static inline int is_powermac7_3(void)
 {
 	return 0;
 }
