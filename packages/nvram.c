@@ -105,7 +105,12 @@ create_free_part( char *ptr, int size )
 	nvpart_t *nvp = (nvpart_t*)ptr;
 	memset( nvp, 0, size );
 
-	strncpy( nvp->name, "77777777777", sizeof(nvp->name) );
+	/*
+	 * The CHRP free partition's name is twelve 0x77 bytes, "wwwwwwwwwwww",
+	 * with no NUL. Mac OS X's IODTNVRAM makes its panic-info partition,
+	 * APL,OSXPanic, only out of a free partition of that name.
+	 */
+	memset( nvp->name, 'w', sizeof(nvp->name) );
 	nvp->signature = NV_SIG_FREE;
 	nvp->len_hi = (size /16) >> 8;
 	nvp->len_lo = size /16;
