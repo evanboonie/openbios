@@ -10,8 +10,9 @@ the machine, so `powermac7_3` needs this fork's build, given with `-bios`, and w
   from time to time, so it doesn't always fast-forward, and each rebase first tags the old head `archive/g5-<date>`,
   so older commits stay fetchable.
 - **Commits are signed off,** as upstream asks.
-- **Nothing is sent upstream for now.** The code is written with Claude, an AI model, and QEMU declines
-  contributions that include AI-generated code. The fork is the deliverable.
+- **Nothing is sent upstream for now.** The code is written with Claude, an AI model, and QEMU, which ships
+  OpenBIOS as its PowerPC firmware, declines contributions that include AI-generated code. The fork is the
+  deliverable.
 
 Upstream's own README is [`README`](https://github.com/evanboonie/openbios/blob/g5/README), and the licence is
 upstream's, the GPL version 2 ([`COPYING`](https://github.com/evanboonie/openbios/blob/g5/COPYING)).
@@ -30,14 +31,14 @@ the other machines keep upstream's device tree, and get only the shared fixes be
 - **The PCI I/O range** of `u3-agp` is at `0xf0000000`, 8 MB, as on the real machine, where `mac99` has it at
   `0xf2000000`.
 - **The interrupt controller:** mac-io's is named `mpic`, and the cpu node's `AAPL,parentIC` points at it.
-- **mac-io is K2:** compatible `K2-Keylargo` and model `AAPL,K2-Keylargo`, as on the real machine, in place of
-  KeyLargo's.
-- **HID5's `dcbz` size:** for Mac OS X, OpenBIOS sets the 970's HID5 to `0x80`, which makes a plain `dcbz` clear
-  32 bytes, as on the AGP G5 under Mac OS X.
+- **mac-io is named K2:** compatible `K2-Keylargo` and model `AAPL,K2-Keylargo`, as on the real machine, in place
+  of KeyLargo's.
+- **HID5's `dcbz` size:** at start-up, OpenBIOS sets the 970's HID5 to `0x80`, for every client, which makes a
+  plain `dcbz` clear 32 bytes, as Mac OS X needs and as on the AGP G5 under Mac OS X.
 - **The flash NVRAM.** With QEMU's `-drive if=pflash`, the NVRAM is an AMD-style flash, and OpenBIOS drives it:
   - the node's compatible is `amd-0137`, `nvram,flash`, and `#bytes` is one bank, `0x2000`
   - the flash holds a Core99 image: two 8 KB banks, each a header and then the CHRP partitions. A boot reads the
-    valid bank with the higher generation, and formats the flash only when neither bank is valid
+    valid bank with the higher generation, and formats the flash when it holds no usable image
   - a write goes to the other bank, with the next generation, through AMD erase and program commands
   - the numbers in the `common` partition are kept in Mac OS X's form (`-1`, decimal, or hex with `0x`), and
     converted to OpenBIOS's form as they're read
@@ -51,7 +52,7 @@ the other machines keep upstream's device tree, and get only the shared fixes be
 - **The 970MP:** `ppc_defs` gets an entry for its PVR, `0x0044`, so `-cpu 970mp_v1.0` and `970mp_v1.1` no longer
   stop at boot with "Unknown cpu".
 - **The timebase frequency** is read from fw_cfg before the PCI probe, so `udelay()` and the probe's timeouts, IDE's
-  among them, are no longer 12.5 times short on QEMU's 25 MHz timebase.
+  among them, are no longer 12.5 times short on the 25 MHz timebase of QEMU's `mac99` and `powermac7_3`.
 - **IDE:** the master is selected before a soft reset, so the wait for BUSY reads the master's status, not that of
   an absent slave. A late reset no longer leaves the master unidentified.
 - **via-cuda's `interrupt-parent`** is set only when the node exists, so a machine with a PMU in place of CUDA
@@ -60,7 +61,9 @@ the other machines keep upstream's device tree, and get only the shared fixes be
 ## Build
 
 The build runs in upstream OpenBIOS's CI image, as its `.github/workflows/main.yml` does, named here by digest
-since its `master` tag can move. It needs Docker, takes a few seconds, and writes `obj-ppc/openbios-qemu.elf`.
+since its `master` tag can move. It needs Docker, takes a few seconds on x86-64, and writes
+`obj-ppc/openbios-qemu.elf`. The image is amd64 only, so on an arm64 host Docker runs it emulated, which is slower
+and prints a platform warning.
 
 ```sh
 git clone https://github.com/evanboonie/openbios.git
@@ -87,13 +90,13 @@ qemu-system-ppc64 -M powermac7_3 -bios /path/to/openbios/obj-ppc/openbios-qemu.e
 ```
 
 For the flash NVRAM, add `-drive if=pflash,format=raw,file=nvram.img`, with a 16 KB file. A new one should be
-erased flash, all `0xFF` bytes, such as `head -c 16384 /dev/zero | tr '\0' '\377' > nvram.img`. The machine's other
-options, its disks and how to boot an OS on it are in the QEMU fork's README and its
+erased flash, all `0xFF` bytes, such as `head -c 16384 /dev/zero | LC_ALL=C tr '\0' '\377' > nvram.img`.
+The machine's other options, its disks and how to boot an OS on it are in the QEMU fork's README and its
 [`docs/system/ppc/powermac.rst`](https://github.com/evanboonie/qemu/blob/g5/docs/system/ppc/powermac.rst).
 
 The same build also runs QEMU's `mac99`, and QEMU's `tests/functional/ppc64/test_mac99.py` passes with it.
 
 ## Tested at
 
-The tag `qemu-g5-q7` on this fork and on the QEMU fork marks the pair of commits tested together. It isn't made
-yet. Until it is, this branch's head is what's described here.
+The tag `qemu-g5-q7` on this fork and on the QEMU fork marks the pair of commits tested together. If this fork
+doesn't have it yet, this branch's head is what's described here.
