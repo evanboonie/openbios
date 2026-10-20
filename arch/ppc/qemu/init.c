@@ -1016,6 +1016,12 @@ arch_of_init(void)
     modules_init();
     setup_timers();
 
+    /* udelay() counts timebase ticks at timer_freq, whose default in
+       drivers/timer.c is 2.5 MHz. Read QEMU's real frequency before the
+       PCI probe below, so its delays and timeouts are as long as asked;
+       cpu_generic_init() runs only after the probe. */
+    timer_freq = fw_cfg_read_i32(FW_CFG_PPC_TBFREQ);
+
     bind_func("ppc-dma-alloc", dma_alloc);
     feval("['] ppc-dma-alloc to (dma-alloc)");
     bind_func("ppc-dma-map-in", dma_map_in);
