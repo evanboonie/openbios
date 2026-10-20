@@ -318,6 +318,125 @@ static int flash_read_bank(int n, uint8_t *buf, uint32_t *gen)
 	return 1;
 }
 
+/*
+ * Mac OS X reads the numbers in the OF variables as C does, with
+ * strtol(.., 0), and writes them back as -1, in decimal below 1000, or else
+ * in hex with "0x" (read: IODTNVRAM::convertPropToObject() and
+ * convertObjectToProp(), iokit/Kernel/IONVRAM.cpp, xnu-1228.15.4).
+ * OpenBIOS's int-configs hold hex digits with no prefix (exec-int-conf in
+ * forth/admin/nvram.fs), so Mac OS X would read load-base's "4000000" as
+ * decimal, and OpenBIOS can't parse the "0x3d0900" it writes back. On the
+ * flash, the "common" partition holds them in Mac OS X's form, converted as
+ * a bank is read and written.
+ */
+#define FLASH_SIG_SYSTEM       0x70
+
+static int flash_is_int_config(const char *name, int len)
+{
+	char buf[64];
+
+	if (len <= 0 || len >= (int)sizeof(buf)) {
+		return 0;
+	}
+	memcpy(buf, name, len);
+	buf[len] = '\0';
+	push_str(buf);
+	fword("int-config?");
+	return POP();
+}
+
+/*
+ * Write an int-config's value in the other side's form into out. Returns 0
+ * if it isn't a number, to be left as it is.
+ */
+static int flash_convert_int(const char *val, char *out, int outlen,
+			     int to_macos)
+{
+	char *end;
+	uint32_t v;
+
+	if (to_macos) {
+		/* OpenBIOS: hex digits, maybe after a minus sign */
+		v = strtol(val, &end, 16);
+	} else {
+		v = strtol(val, &end, 0);
+	}
+	if (end == val || *end) {
+		return 0;
+	} else if (v == 0xffffffff) {
+		snprintf(out, outlen, "-1");
+	} else if (!to_macos) {
+		snprintf(out, outlen, "%x", v);
+	} else if (v < 1000) {
+		snprintf(out, outlen, "%u", v);
+	} else {
+		snprintf(out, outlen, "0x%x", v);
+	}
+	return 1;
+}
+
+/*
+ * Convert the int-configs' values in the system partition named "common", in
+ * the partitions at data, from OpenBIOS's form to Mac OS X's or back. The
+ * partition is left as it was if the result wouldn't fit it.
+ */
+static void flash_convert_configs(uint8_t *data, int size, int to_macos)
+{
+	uint8_t *p = data, *cfg = NULL, *out = NULL;
+	int len, cfg_size = 0, i, o;
+	char val[32];
+
+	while (p + 16 <= data + size) {
+		len = ((p[2] << 8) | p[3]) * 16;
+		if (len < 16 || p + len > data + size) {
+			return;
+		}
+		if (p[0] == FLASH_SIG_SYSTEM &&
+		    !strncmp((char *)p + 4, "common", 12)) {
+			cfg = p + 16;
+			cfg_size = len - 16;
+			break;
+		}
+		p += len;
+	}
+	if (!cfg || !(out = malloc(cfg_size))) {
+		return;
+	}
+	memset(out, 0, cfg_size);
+	for (i = 0, o = 0; i < cfg_size && cfg[i]; ) {
+		char *str = (char *)cfg + i, *eq;
+		int slen = strnlen(str, cfg_size - i);
+		int n;
+
+		if (i + slen >= cfg_size) {
+			/* Not terminated within the partition */
+			goto out;
+		}
+		eq = strchr(str, '=');
+		if (eq && flash_is_int_config(str, eq - str) &&
+		    flash_convert_int(eq + 1, val, sizeof(val), to_macos)) {
+			n = (eq + 1 - str) + strlen(val);
+			/* Leave room for this string's NUL and the list's */
+			if (o + n + 2 > cfg_size) {
+				goto out;
+			}
+			memcpy(out + o, str, eq + 1 - str);
+			memcpy(out + o + (eq + 1 - str), val, strlen(val));
+		} else {
+			n = slen;
+			if (o + n + 2 > cfg_size) {
+				goto out;
+			}
+			memcpy(out + o, str, n);
+		}
+		o += n + 1;
+		i += slen + 1;
+	}
+	memcpy(cfg, out, cfg_size);
+out:
+	free(out);
+}
+
 /* Fill buf with the current bank's partitions, or zeros if neither is valid */
 static void flash_nvram_get(char *buf)
 {
@@ -346,6 +465,9 @@ static void flash_nvram_get(char *buf)
 		flash_gen = gen[flash_cur];
 		flash_read_bank(flash_cur, bank, &gen[flash_cur]);
 		memcpy(buf, bank + FLASH_HDR_SIZE, FLASH_DATA_SIZE);
+		flash_convert_configs((uint8_t *)buf, FLASH_DATA_SIZE, 0);
+		printk("flash NVRAM: bank %d, generation %u\n", flash_cur,
+		       flash_gen);
 	}
 	free(bank);
 }
@@ -365,8 +487,11 @@ static void flash_nvram_put(char *buf)
 		printk("flash NVRAM: out of memory, not written\n");
 		goto out;
 	}
+	memcpy(img + FLASH_HDR_SIZE, buf, FLASH_DATA_SIZE);
+	flash_convert_configs(img + FLASH_HDR_SIZE, FLASH_DATA_SIZE, 1);
 	if (flash_cur >= 0 && flash_read_bank(flash_cur, cur, &gen) &&
-	    !memcmp(cur + FLASH_HDR_SIZE, buf, FLASH_DATA_SIZE)) {
+	    !memcmp(cur + FLASH_HDR_SIZE, img + FLASH_HDR_SIZE,
+		    FLASH_DATA_SIZE)) {
 		goto out;
 	}
 
@@ -377,13 +502,13 @@ static void flash_nvram_put(char *buf)
 	strncpy((char *)img + 4, "nvram", 12);
 	gen = flash_cur >= 0 ? flash_gen + 1 : 1;
 	flash_put_be32(img + FLASH_HDR_GEN, gen);
-	memcpy(img + FLASH_HDR_SIZE, buf, FLASH_DATA_SIZE);
 	flash_put_be32(img + FLASH_HDR_ADLER,
 		       flash_adler32(img + FLASH_HDR_GEN,
 				     FLASH_BANK_SIZE - FLASH_HDR_GEN));
 	img[1] = flash_hdr_checksum(img);
 
 	next = flash_cur == 0 ? 1 : 0;
+	printk("flash NVRAM: writing bank %d, generation %u\n", next, gen);
 	if (flash_erase_bank(flash_bank(next)) ||
 	    flash_program_bank(flash_bank(next), img)) {
 		printk("flash NVRAM: bank %d not written\n", next);

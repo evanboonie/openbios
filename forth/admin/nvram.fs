@@ -117,6 +117,15 @@ constant config-info.size
   r> config-default
 ;
 
+\ for an NVRAM that holds numbers in another form, such as Mac OS X's
+: int-config? ( name len -- flag )
+  find-config ?dup if
+    >cf.exec-xt @ ['] exec-int-conf =
+  else
+    false
+  then
+;
+
 \ ------------------------------------------------------------
 
 : exec-secmode-conf ( str len -- n )
