@@ -999,10 +999,12 @@ ob_ide_software_reset(struct ide_drive *drive)
 	struct ide_channel *chan = drive->channel;
 
 	/*
-	 * select the master first, so that the wait for BUSY clear below
-	 * reads its status. An absent slave's status reads 0 even while
-	 * the reset is pending, and the device select can't be written
-	 * once the reset has set BUSY.
+	 * select the master first, for QEMU: its soft reset leaves the
+	 * slave selected, and an absent slave's status reads 0 even while
+	 * the reset is pending, so the wait for BUSY clear below would
+	 * return at once. With the master selected, the wait reads its
+	 * BUSY. The select can't be written once the reset has set BUSY.
+	 * On real ATA, SRST clears DEV, so this is a no-op there.
 	 */
 	if (chan->drives[0].present) {
 		ob_ide_pio_writeb(drive, IDEREG_CURRENT, IDEHEAD_DEV0);
