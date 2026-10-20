@@ -107,6 +107,9 @@ fw_cfg_read_file(const char *filename, uint32_t *size)
 
     if (fw_cfg_find_file(filename, &cmd, &nbytes)) {
         buf = malloc(nbytes);
+        if (!buf) {
+            return NULL;
+        }
         fw_cfg_read(cmd, buf, nbytes);
         *size = nbytes;
         return buf;

@@ -217,6 +217,28 @@ nvconf_init( void )
 	}
 }
 
+/*
+ * Set the variables in env, the data of a CHRP system partition ("name=value"
+ * strings, each with its NUL, then one more NUL), over those nvconf_init()
+ * loaded. QEMU hands -prom-env over in this form, in fw_cfg's etc/prom-env.
+ */
+void
+nvconf_load_env( char *env, int size )
+{
+	if( size < 1 || env[size - 1] || (size > 1 && env[size - 2]) ) {
+		printk("nvram: environment of %d bytes isn't terminated, ignored\n",
+		       size);
+		return;
+	}
+	if( !nvram.config || size > nvram.config_size ) {
+		printk("nvram: environment of %d bytes doesn't fit the %d-byte "
+		       "system partition, ignored\n", size, nvram.config_size);
+		return;
+	}
+	PUSH( pointer2cell(env) );
+	PUSH( size );
+	fword("nvram-load-configs");
+}
 
 /************************************************************************/
 /*	nvram								*/
