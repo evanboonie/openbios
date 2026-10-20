@@ -996,6 +996,17 @@ int macio_keylargo_config_cb (const pci_config_t *config)
 {
         pci_set_ranges(config);
 
+        if (is_powermac7_3()) {
+                /* The real PowerMac7,3's mac-io is K2's, which Mac OS X's
+                   AppleK2 matches by its compatible. Under MacRISC4PE only
+                   AppleK2 provides the Ethernet cell's clock call that the
+                   GMAC driver waits for, and AppleKeyLargo doesn't. */
+                phandle_t ph = get_cur_dev();
+
+                set_property(ph, "compatible", "K2-Keylargo", 12);
+                set_property(ph, "model", "AAPL,K2-Keylargo", 17);
+        }
+
 #ifdef CONFIG_DRIVER_MACIO
         ob_macio_keylargo_init(config->path, config->assigned[0] & ~0x0000000F);
 #endif
