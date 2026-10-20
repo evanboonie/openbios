@@ -59,7 +59,9 @@ static char *nvram;
  * OpenBIOS runs from a RAM copy of 0xfff00000-0xffffffff, which it maps over
  * that range (arch/ppc/qemu/ofmem.c), so a load or store at the flash's
  * address reaches the copy, not the device. The flash is reached with data
- * translation off instead, one byte at a time.
+ * translation off instead, one byte at a time. That relies on QEMU, which
+ * doesn't model caching: on a real 970, real-mode data accesses are cacheable
+ * unless HID4's real-mode cache-inhibit bit is set.
  */
 #define FLASH_BANK_SIZE        0x2000
 #define FLASH_HDR_SIZE         0x20
@@ -376,14 +378,38 @@ static int flash_convert_int(const char *val, char *out, int outlen,
 }
 
 /*
+ * Say that an entry was dropped, by its name alone, since a value such as
+ * platform-uuid's can hold a MAC address. printk() ignores a precision for
+ * "%s", so the name is copied out.
+ */
+static void flash_dropped(const char *str, int namelen, const char *why)
+{
+	char name[32];
+
+	if (namelen > (int)sizeof(name) - 1) {
+		namelen = sizeof(name) - 1;
+	}
+	memcpy(name, str, namelen);
+	name[namelen] = '\0';
+	printk("flash NVRAM: dropped an entry%s%s, which %s\n",
+	       namelen ? " named " : "", name, why);
+}
+
+/*
  * Convert the int-configs' values in the system partition named "common", in
- * the partitions at data, from OpenBIOS's form to Mac OS X's or back. The
- * partition is left as it was if the result wouldn't fit it.
+ * the partitions at data, from OpenBIOS's form to Mac OS X's or back, one
+ * entry at a time. An entry that doesn't fit the partition is dropped, with a
+ * message naming it, and the others are still converted, so that no number is
+ * left in the other side's form.
+ *
+ * Mac OS X may fill the partition to its last byte, with no empty string to
+ * end the list. OpenBIOS's nvram-load-configs needs one, so when reading, an
+ * entry that leaves no room for it is dropped as well.
  */
 static void flash_convert_configs(uint8_t *data, int size, int to_macos)
 {
 	uint8_t *p = data, *cfg = NULL, *out = NULL;
-	int len, cfg_size = 0, i, o;
+	int len, cfg_size = 0, i, o, last = -1;
 	char val[32];
 
 	while (p + 16 <= data + size) {
@@ -406,34 +432,43 @@ static void flash_convert_configs(uint8_t *data, int size, int to_macos)
 	for (i = 0, o = 0; i < cfg_size && cfg[i]; ) {
 		char *str = (char *)cfg + i, *eq;
 		int slen = strnlen(str, cfg_size - i);
-		int n;
+		int namelen, n, conv;
 
 		if (i + slen >= cfg_size) {
-			/* Not terminated within the partition */
-			goto out;
+			flash_dropped(str, 0, "has no end");
+			break;
 		}
 		eq = strchr(str, '=');
-		if (eq && flash_is_int_config(str, eq - str) &&
-		    flash_convert_int(eq + 1, val, sizeof(val), to_macos)) {
-			n = (eq + 1 - str) + strlen(val);
-			/* Leave room for this string's NUL and the list's */
-			if (o + n + 2 > cfg_size) {
-				goto out;
-			}
-			memcpy(out + o, str, eq + 1 - str);
-			memcpy(out + o + (eq + 1 - str), val, strlen(val));
+		/* The name, with no value: only the name is ever printed */
+		namelen = eq ? eq - str : 0;
+		conv = eq && flash_is_int_config(str, namelen) &&
+		       flash_convert_int(eq + 1, val, sizeof(val), to_macos);
+		n = conv ? namelen + 1 + (int)strlen(val) : slen;
+		/* The entry and its NUL, and on writes the list's NUL */
+		if (o + n + (to_macos ? 2 : 1) > cfg_size) {
+			flash_dropped(str, namelen, "doesn't fit");
 		} else {
-			n = slen;
-			if (o + n + 2 > cfg_size) {
-				goto out;
+			if (conv) {
+				memcpy(out + o, str, namelen + 1);
+				memcpy(out + o + namelen + 1, val, strlen(val));
+			} else {
+				memcpy(out + o, str, n);
 			}
-			memcpy(out + o, str, n);
+			last = o;
+			o += n + 1;
 		}
-		o += n + 1;
 		i += slen + 1;
 	}
+	if (o >= cfg_size && last >= 0) {
+		/* No room left for the empty string that ends the list */
+		char *eq = strchr((char *)out + last, '=');
+		int namelen = eq ? eq - ((char *)out + last) : 0;
+
+		flash_dropped((char *)out + last, namelen,
+			      "leaves no room for the list's end");
+		memset(out + last, 0, cfg_size - last);
+	}
 	memcpy(cfg, out, cfg_size);
-out:
 	free(out);
 }
 
