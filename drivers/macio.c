@@ -21,6 +21,8 @@
 #include "pmu.h"
 #include "escc.h"
 #include "drivers/pci.h"
+#include "arch/ppc/processor.h"
+#include "timer.h"
 
 #define OW_IO_NVRAM_SIZE   0x00020000
 #define OW_IO_NVRAM_OFFSET 0x00060000
@@ -33,6 +35,378 @@
 #define IO_OPENPIC_OFFSET  0x00040000
 
 static char *nvram;
+
+/*
+ * powermac7_3's flash NVRAM (evanboonie/qemu-g5#33)
+ *
+ * With -drive if=pflash, QEMU's powermac7_3 puts an AMD-style flash at the
+ * NVRAM's address, as on the real G5, and sets FW_CFG_PPC_NVRAM_FLAT. Mac OS
+ * X drives it with AppleFlashNVRAMAMD, which matches "amd-0137" and keeps a
+ * Core99 image in it: two 8 KB banks, each a 32-byte header and then the
+ * CHRP partitions. The header has signature 0x5a, a CHRP checksum over its
+ * first 16 bytes, an Adler-32 of the bank from byte 20, and a generation.
+ * The valid bank with the higher generation is the current one, and a write
+ * goes to the other bank, with the generation one higher (read in
+ * AppleFlashNVRAM-105.4.0: AppleFlashNVRAM.h:75-92, AppleFlashNVRAM.cpp:79-95,
+ * :177-231, :252-308).
+ *
+ * Here OpenBIOS's own partitions, "common" among them, fill the rest of the
+ * current bank. The header's length is 2, so that a partition walk such as
+ * IODTNVRAM's steps from it to the first of them. The flash ignores plain
+ * stores, so a bank is erased and programmed with AMD commands, and checked
+ * by reading it back.
+ *
+ * OpenBIOS runs from a RAM copy of 0xfff00000-0xffffffff, which it maps over
+ * that range (arch/ppc/qemu/ofmem.c), so a load or store at the flash's
+ * address reaches the copy, not the device. The flash is reached with data
+ * translation off instead, one byte at a time.
+ */
+#define FLASH_BANK_SIZE        0x2000
+#define FLASH_HDR_SIZE         0x20
+#define FLASH_HDR_SIG          0x5a
+#define FLASH_HDR_ADLER        16
+#define FLASH_HDR_GEN          20
+#define FLASH_DATA_SIZE        (FLASH_BANK_SIZE - FLASH_HDR_SIZE)
+#define FLASH_POLL_SECONDS     2
+
+/* AMD command addresses, relative to the bank, and commands */
+#define AMD_ADDR1              0x555
+#define AMD_ADDR2              0x2aa
+#define AMD_UNLOCK1            0xaa
+#define AMD_UNLOCK2            0x55
+#define AMD_BYPASS             0x20
+#define AMD_ERASE              0x80
+#define AMD_SECTOR_ERASE       0x30
+#define AMD_PROGRAM            0xa0
+#define AMD_BYPASS_RESET1      0x90
+#define AMD_BYPASS_RESET2      0x00
+#define AMD_RESET              0xf0
+#define AMD_DQ6                0x40
+#define AMD_DQ5                0x20
+
+/* The timebase's frequency, from drivers/timer.c */
+extern unsigned long timer_freq;
+
+static int nvram_flash = -1;
+static unsigned long flash_base;
+static int flash_cur = -1;
+static uint32_t flash_gen;
+
+static int macio_nvram_is_flash(void)
+{
+	if (nvram_flash < 0) {
+		nvram_flash = is_powermac7_3() &&
+			fw_cfg_read_i32(FW_CFG_PPC_NVRAM_FLAT);
+	}
+	return nvram_flash;
+}
+
+#ifdef __powerpc64__
+#define FLASH_MTMSR "mtmsrd"
+#else
+#define FLASH_MTMSR "mtmsr"
+#endif
+
+/* Read a byte at physical address pa, with data translation off */
+static uint8_t flash_in8(unsigned long pa)
+{
+	unsigned long msr, tmp;
+	unsigned long val;
+
+	asm volatile("mfmsr %0\n\t"
+		     "andc %1,%0,%4\n\t"
+		     "sync\n\t"
+		     FLASH_MTMSR " %1\n\t"
+		     "isync\n\t"
+		     "lbz %2,0(%3)\n\t"
+		     "sync\n\t"
+		     FLASH_MTMSR " %0\n\t"
+		     "isync"
+		     : "=&r" (msr), "=&r" (tmp), "=&r" (val)
+		     : "b" (pa), "r" ((unsigned long)(MSR_DR | MSR_EE))
+		     : "memory");
+	return val;
+}
+
+/* Write a byte at physical address pa, with data translation off */
+static void flash_out8(unsigned long pa, uint8_t val)
+{
+	unsigned long msr, tmp;
+
+	asm volatile("mfmsr %0\n\t"
+		     "andc %1,%0,%4\n\t"
+		     "sync\n\t"
+		     FLASH_MTMSR " %1\n\t"
+		     "isync\n\t"
+		     "stb %3,0(%2)\n\t"
+		     "sync\n\t"
+		     FLASH_MTMSR " %0\n\t"
+		     "isync"
+		     : "=&r" (msr), "=&r" (tmp)
+		     : "b" (pa), "r" ((unsigned long)val),
+		       "r" ((unsigned long)(MSR_DR | MSR_EE))
+		     : "memory");
+}
+
+static uint64_t flash_timebase(void)
+{
+	unsigned long hi, lo, hi2;
+
+	do {
+		asm volatile("mftbu %0" : "=r" (hi));
+		asm volatile("mftb %0" : "=r" (lo));
+		asm volatile("mftbu %0" : "=r" (hi2));
+	} while (hi != hi2);
+	return ((uint64_t)(uint32_t)hi << 32) | (uint32_t)lo;
+}
+
+/*
+ * Wait for an erase or a program at pa to finish: DQ6 toggles on each read
+ * while it runs. DQ5 set while DQ6 still toggles is the part's own timeout.
+ * Returns 0 when done, or -1 after resetting the part.
+ */
+static int flash_wait(unsigned long pa)
+{
+	uint64_t start = flash_timebase();
+	uint64_t limit = (uint64_t)timer_freq * FLASH_POLL_SECONDS;
+	uint8_t a, b;
+
+	for (;;) {
+		a = flash_in8(pa);
+		b = flash_in8(pa);
+		if (((a ^ b) & AMD_DQ6) == 0) {
+			return 0;
+		}
+		if (b & AMD_DQ5) {
+			/* DQ6 may have stopped just as DQ5 was set */
+			a = flash_in8(pa);
+			b = flash_in8(pa);
+			if (((a ^ b) & AMD_DQ6) == 0) {
+				return 0;
+			}
+			break;
+		}
+		if (flash_timebase() - start > limit) {
+			break;
+		}
+	}
+	flash_out8(pa, AMD_RESET);
+	return -1;
+}
+
+static void flash_unlock(unsigned long bank)
+{
+	flash_out8(bank + AMD_ADDR1, AMD_UNLOCK1);
+	flash_out8(bank + AMD_ADDR2, AMD_UNLOCK2);
+}
+
+static int flash_erase_bank(unsigned long bank)
+{
+	int i;
+
+	flash_unlock(bank);
+	flash_out8(bank + AMD_ADDR1, AMD_ERASE);
+	flash_unlock(bank);
+	flash_out8(bank, AMD_SECTOR_ERASE);
+	/* The erase may start only after the 50 us sector erase window */
+	udelay(60);
+	if (flash_wait(bank)) {
+		printk("flash NVRAM: erase at 0x%lx timed out\n", bank);
+		return -1;
+	}
+	for (i = 0; i < FLASH_BANK_SIZE; i++) {
+		if (flash_in8(bank + i) != 0xff) {
+			printk("flash NVRAM: byte 0x%x at 0x%lx not erased\n", i, bank);
+			return -1;
+		}
+	}
+	return 0;
+}
+
+static int flash_program_bank(unsigned long bank, const uint8_t *data)
+{
+	int i, err = 0;
+
+	/* Unlock bypass: one command cycle per byte, not three */
+	flash_unlock(bank);
+	flash_out8(bank + AMD_ADDR1, AMD_BYPASS);
+	for (i = 0; i < FLASH_BANK_SIZE; i++) {
+		flash_out8(bank + AMD_ADDR1, AMD_PROGRAM);
+		flash_out8(bank + i, data[i]);
+		if (flash_wait(bank + i)) {
+			printk("flash NVRAM: program at 0x%lx timed out\n", bank + i);
+			err = -1;
+			break;
+		}
+	}
+	flash_out8(bank, AMD_BYPASS_RESET1);
+	flash_out8(bank, AMD_BYPASS_RESET2);
+	if (err) {
+		return err;
+	}
+	for (i = 0; i < FLASH_BANK_SIZE; i++) {
+		if (flash_in8(bank + i) != data[i]) {
+			printk("flash NVRAM: byte 0x%x at 0x%lx reads back wrong\n", i, bank);
+			return -1;
+		}
+	}
+	return 0;
+}
+
+/* The CHRP header checksum over bytes 0-15, leaving out byte 1 */
+static uint8_t flash_hdr_checksum(const uint8_t *p)
+{
+	unsigned int sum = p[0];
+	int i;
+
+	for (i = 2; i < 16; i++) {
+		sum += p[i];
+		if (sum > 0xff) {
+			sum = (sum + 1) & 0xff;
+		}
+	}
+	return sum;
+}
+
+static uint32_t flash_adler32(const uint8_t *p, int len)
+{
+	uint32_t a = 1, b = 0;
+	int i;
+
+	for (i = 0; i < len; i++) {
+		a = (a + p[i]) % 65521;
+		b = (b + a) % 65521;
+	}
+	return (b << 16) | a;
+}
+
+static uint32_t flash_get_be32(const uint8_t *p)
+{
+	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+	       ((uint32_t)p[2] << 8) | p[3];
+}
+
+static void flash_put_be32(uint8_t *p, uint32_t v)
+{
+	p[0] = v >> 24;
+	p[1] = v >> 16;
+	p[2] = v >> 8;
+	p[3] = v;
+}
+
+static unsigned long flash_bank(int n)
+{
+	return flash_base + n * FLASH_BANK_SIZE;
+}
+
+/* Read bank n into buf. Returns 1 if its header is valid, with its generation */
+static int flash_read_bank(int n, uint8_t *buf, uint32_t *gen)
+{
+	unsigned long bank = flash_bank(n);
+	int i;
+
+	for (i = 0; i < FLASH_BANK_SIZE; i++) {
+		buf[i] = flash_in8(bank + i);
+	}
+	if (buf[0] != FLASH_HDR_SIG ||
+	    buf[1] != flash_hdr_checksum(buf) ||
+	    flash_get_be32(buf + FLASH_HDR_ADLER) !=
+	    flash_adler32(buf + FLASH_HDR_GEN, FLASH_BANK_SIZE - FLASH_HDR_GEN)) {
+		return 0;
+	}
+	*gen = flash_get_be32(buf + FLASH_HDR_GEN);
+	return 1;
+}
+
+/* Fill buf with the current bank's partitions, or zeros if neither is valid */
+static void flash_nvram_get(char *buf)
+{
+	uint8_t *bank = malloc(FLASH_BANK_SIZE);
+	uint32_t gen[2] = { 0, 0 };
+	int valid[2];
+
+	if (!bank) {
+		printk("flash NVRAM: out of memory\n");
+		memset(buf, 0, FLASH_DATA_SIZE);
+		return;
+	}
+	valid[0] = flash_read_bank(0, bank, &gen[0]);
+	valid[1] = flash_read_bank(1, bank, &gen[1]);
+	if (valid[0] && (!valid[1] || gen[0] > gen[1])) {
+		flash_cur = 0;
+	} else if (valid[1]) {
+		flash_cur = 1;
+	} else {
+		flash_cur = -1;
+	}
+	if (flash_cur < 0) {
+		printk("flash NVRAM: no valid bank\n");
+		memset(buf, 0, FLASH_DATA_SIZE);
+	} else {
+		flash_gen = gen[flash_cur];
+		flash_read_bank(flash_cur, bank, &gen[flash_cur]);
+		memcpy(buf, bank + FLASH_HDR_SIZE, FLASH_DATA_SIZE);
+	}
+	free(bank);
+}
+
+/*
+ * Write buf's partitions into the bank that isn't current, with the next
+ * generation, unless the current bank already holds them.
+ */
+static void flash_nvram_put(char *buf)
+{
+	uint8_t *img = malloc(FLASH_BANK_SIZE);
+	uint8_t *cur = malloc(FLASH_BANK_SIZE);
+	uint32_t gen;
+	int next;
+
+	if (!img || !cur) {
+		printk("flash NVRAM: out of memory, not written\n");
+		goto out;
+	}
+	if (flash_cur >= 0 && flash_read_bank(flash_cur, cur, &gen) &&
+	    !memcmp(cur + FLASH_HDR_SIZE, buf, FLASH_DATA_SIZE)) {
+		goto out;
+	}
+
+	memset(img, 0, FLASH_HDR_SIZE);
+	img[0] = FLASH_HDR_SIG;
+	img[2] = (FLASH_HDR_SIZE / 16) >> 8;
+	img[3] = FLASH_HDR_SIZE / 16;
+	strncpy((char *)img + 4, "nvram", 12);
+	gen = flash_cur >= 0 ? flash_gen + 1 : 1;
+	flash_put_be32(img + FLASH_HDR_GEN, gen);
+	memcpy(img + FLASH_HDR_SIZE, buf, FLASH_DATA_SIZE);
+	flash_put_be32(img + FLASH_HDR_ADLER,
+		       flash_adler32(img + FLASH_HDR_GEN,
+				     FLASH_BANK_SIZE - FLASH_HDR_GEN));
+	img[1] = flash_hdr_checksum(img);
+
+	next = flash_cur == 0 ? 1 : 0;
+	if (flash_erase_bank(flash_bank(next)) ||
+	    flash_program_bank(flash_bank(next), img)) {
+		printk("flash NVRAM: bank %d not written\n", next);
+		goto out;
+	}
+	flash_cur = next;
+	flash_gen = gen;
+out:
+	free(cur);
+	free(img);
+}
+
+/* Set the variables in QEMU's etc/prom-env (-prom-env) over the flash's */
+static void flash_nvram_prom_env(void)
+{
+	uint32_t size;
+	char *env = fw_cfg_read_file("etc/prom-env", &size);
+
+	if (env) {
+		nvconf_load_env(env, size);
+		free(env);
+	}
+}
 
 static int macio_nvram_shift(void)
 {
@@ -48,7 +422,11 @@ static int macio_nvram_shift(void)
 int
 macio_get_nvram_size(void)
 {
-	int shift = macio_nvram_shift();
+	int shift;
+
+	if (macio_nvram_is_flash())
+		return FLASH_DATA_SIZE;
+	shift = macio_nvram_shift();
         if (is_oldworld())
                 return OW_IO_NVRAM_SIZE >> shift;
         else
@@ -91,15 +469,25 @@ void macio_nvram_init(const char *path, phys_addr_t addr)
         nvram_size = macio_nvram_size();
 
 	nvram = (char*)addr + nvram_offset;
+	flash_base = addr + nvram_offset;
 	nvconf_init();
+	if (macio_nvram_is_flash())
+		flash_nvram_prom_env();
 	snprintf(buf, sizeof(buf), "%s", path);
 	dnode = nvram_init(buf);
-	set_int_property(dnode, "#bytes", arch_nvram_size() );
+	/* On the flash, one bank, as on the real G5 */
+	set_int_property(dnode, "#bytes", macio_nvram_is_flash() ?
+			 FLASH_BANK_SIZE : arch_nvram_size() );
 	props[0] = __cpu_to_be32(nvram_offset);
 	props[1] = __cpu_to_be32(nvram_size);
 	set_property(dnode, "reg", (char *)&props, sizeof(props));
 	set_property(dnode, "device_type", "nvram", 6);
-	NEWWORLD(set_property(dnode, "compatible", "nvram,flash", 12));
+	if (macio_nvram_is_flash()) {
+		/* The real G5's, which AppleFlashNVRAMAMD matches */
+		set_property(dnode, "compatible", "amd-0137\0nvram,flash", 21);
+	} else {
+		NEWWORLD(set_property(dnode, "compatible", "nvram,flash", 12));
+	}
 
 	chosen = find_dev("/chosen");
 	snprintf(buf, sizeof(buf), "%s", get_path_from_ph(dnode));
@@ -136,8 +524,13 @@ void
 macio_nvram_put(char *buf)
 {
 	int i;
-        unsigned int it_shift = macio_nvram_shift();
+        unsigned int it_shift;
 
+	if (macio_nvram_is_flash()) {
+		flash_nvram_put(buf);
+		return;
+	}
+	it_shift = macio_nvram_shift();
 	for (i=0; i < arch_nvram_size(); i++)
 		nvram[i << it_shift] = buf[i];
 #ifdef DUMP_NVRAM
@@ -150,8 +543,13 @@ void
 macio_nvram_get(char *buf)
 {
 	int i;
-        unsigned int it_shift = macio_nvram_shift();
+        unsigned int it_shift;
 
+	if (macio_nvram_is_flash()) {
+		flash_nvram_get(buf);
+		return;
+	}
+	it_shift = macio_nvram_shift();
 	for (i=0; i< arch_nvram_size(); i++)
                 buf[i] = nvram[i << it_shift];
 

@@ -20,6 +20,7 @@
 #include "kernel/stack.h"
 
 extern void	nvconf_init( void );
+extern void	nvconf_load_env( char *env, int size );
 extern phandle_t	nvram_init( const char *path );
 extern void	update_nvram( void );
 
