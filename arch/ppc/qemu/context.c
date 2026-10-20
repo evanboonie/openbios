@@ -263,6 +263,9 @@ arch_init_program(void)
         ctx->regs[REG_R4] = loadbase;
     }
 
+    feval("load-state >ls.file-type @ xcoff =");
+    cpu_970_set_client_hid5(POP());
+
     return 0;
 }
 

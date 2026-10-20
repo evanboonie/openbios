@@ -450,8 +450,9 @@ ppc64_patch_handlers(void)
 #pragma GCC diagnostic pop
 #endif
 
-/* Make a plain dcbz clear 32 bytes, as on the PowerMac7,3: HID5 bit 56
- * (DCBZ_size) set, bits 55 (dst_noop) and 57 (DCBZ32_ill) clear. On the
+/* Write the 970's HID5. 0x80 makes a plain dcbz clear 32 bytes, as on the
+ * PowerMac7,3: HID5 bit 56 (DCBZ_size) set, bits 55 (dst_noop) and 57
+ * (DCBZ32_ill) clear. 0 makes it clear the 128-byte line. On the
  * 970, HID5 is SPR 1014, not S_HID5. A change to bit 56 or 57 needs sync;
  * mtspr; isync, then a flush of the whole I-cache (970FX User's Manual
  * v1.7, Table 2-5 and its Note 4, and 2.2.8.5). The write leaves HID5's
@@ -469,13 +470,15 @@ ppc64_patch_handlers(void)
  * CONFIG_PPC_64BITSUPPORT too.
  */
 #ifdef CONFIG_PPC_64BITSUPPORT
+static int hid5_per_client;
+
 static void
-cpu_970_set_dcbz32(void)
+cpu_970_set_hid5(unsigned long hid5)
 {
     asm volatile("sync\n\t"
                  "mtspr " __stringify(S_970_HID5) ", %0\n\t"
                  "isync"
-                 : : "r" (0x80) : "memory");
+                 : : "r" (hid5) : "memory");
 
     asm volatile(".machine push\n\t"
                  ".machine ppc64\n\t"
@@ -501,6 +504,28 @@ cpu_970_set_dcbz32(void)
                  : : : "r9", "r10", "r11", "ctr", "memory");
 }
 #endif
+
+/* Called by arch_init_program() for each client it starts. On the
+ * powermac7_3, give an XCOFF client, which is how BootX starts, the 32-byte
+ * dcbz that cpu_970_init() set, and any other client, such as a Linux ELF or
+ * a -kernel image, HID5 at 0. arch_init_program() also runs for FCode and
+ * Forth boot files, which get 0 like any other non-XCOFF client.
+ *
+ * Mac OS X needs 0x80 from the firmware: xnu only saves the boot CPU's HID5
+ * at __start and copies it to the others, and BootX never writes it. Linux
+ * steps its dcbz by the cpu node's d-cache-block-size, 128 bytes, and clears
+ * HID5 bits 56 and 57 itself only in HV mode (__cpu_preinit_ppc970), which
+ * QEMU's 970 doesn't model. On a real G5 it runs in HV mode.
+ */
+void
+cpu_970_set_client_hid5(int xcoff)
+{
+#ifdef CONFIG_PPC_64BITSUPPORT
+    if (hid5_per_client) {
+        cpu_970_set_hid5(xcoff ? 0x80 : 0);
+    }
+#endif
+}
 
 static void
 cpu_970_init(const struct cpudef *cpu)
@@ -533,7 +558,8 @@ cpu_970_init(const struct cpudef *cpu)
 
 #ifdef CONFIG_PPC_64BITSUPPORT
     if (machine_id == ARCH_POWERMAC7_3) {
-        cpu_970_set_dcbz32();
+        cpu_970_set_hid5(0x80);
+        hid5_per_client = 1;
     }
 #endif
 }

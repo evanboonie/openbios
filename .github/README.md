@@ -33,8 +33,10 @@ the other machines keep upstream's device tree, and get only the shared fixes be
 - **The interrupt controller:** mac-io's is named `mpic`, and the cpu node's `AAPL,parentIC` points at it.
 - **mac-io is named K2:** compatible `K2-Keylargo` and model `AAPL,K2-Keylargo`, as on the real machine, in place
   of KeyLargo's.
-- **HID5's `dcbz` size:** at start-up, OpenBIOS sets the 970's HID5 to `0x80`, for every client, which makes a
-  plain `dcbz` clear 32 bytes, as Mac OS X needs and as on the AGP G5 under Mac OS X.
+- **HID5's `dcbz` size:** OpenBIOS sets the 970's HID5 for each client it starts: `0x80` for an XCOFF client, which
+  is how BootX starts, so a plain `dcbz` clears 32 bytes, as Mac OS X needs and as on the AGP G5 under Mac OS X; and 0
+  for any other client, such as a Linux ELF or a `-kernel` image, which steps `dcbz` by the 128-byte
+  `d-cache-block-size`.
 - **The flash NVRAM.** With QEMU's `-drive if=pflash`, the NVRAM is an AMD-style flash, and OpenBIOS drives it:
   - the node's compatible is `amd-0137`, `nvram,flash`, and `#bytes` is one bank, `0x2000`
   - the flash holds a Core99 image: two 8 KB banks, each a header and then the CHRP partitions. A boot reads the

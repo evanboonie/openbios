@@ -26,6 +26,9 @@ init_context(uint8_t *stack, uint32_t stack_size, int num_param);
 /* Switch context */
 struct context *switch_to(struct context *);
 
+/* Set the 970's HID5 for the client about to start (init.c) */
+void cpu_970_set_client_hid5(int xcoff);
+
 /* Holds physical address of boot context */
 extern unsigned long __boot_ctx;
 
