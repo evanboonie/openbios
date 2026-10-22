@@ -287,7 +287,7 @@ push_physaddr(phys_addr_t value)
 extern unsigned long timer_freq;
 
 static void
-cpu_generic_init(const struct cpudef *cpu)
+cpu_generic_init_state(const struct cpudef *cpu, const char *state)
 {
     push_str("/cpus");
     fword("find-device");
@@ -361,7 +361,7 @@ cpu_generic_init(const struct cpudef *cpu)
     push_str("bus-frequency");
     fword("property");
 
-    push_str("running");
+    push_str(state);
     fword("encode-string");
     push_str("state");
     fword("property");
@@ -370,6 +370,12 @@ cpu_generic_init(const struct cpudef *cpu)
     fword("encode-int");
     push_str("reservation-granule-size");
     fword("property");
+}
+
+static void
+cpu_generic_init(const struct cpudef *cpu)
+{
+    cpu_generic_init_state(cpu, "running");
 }
 
 static void
@@ -527,12 +533,20 @@ cpu_970_set_client_hid5(int xcoff)
 #endif
 }
 
-static void
-cpu_970_init(const struct cpudef *cpu)
-{
-    cpu_generic_init(cpu);
+/* The K2 GPIO that soft-resets CPU 0, as the real PowerMac7,3's cpu@0
+ * names it in its soft-reset property. CPU n's is the next one along. */
+#define POWERMAC7_3_SOFT_RESET_GPIO 0x71
 
-    PUSH(0);
+/* Makes CPU n's node under /cpus. Its properties are the running CPU's,
+ * CPU 0's: OpenBIOS runs only on CPU 0, and the machine's CPUs are all one
+ * model. CPU 0 is running, and the others are stopped until the OS starts
+ * them. */
+static void
+cpu_970_add_node(const struct cpudef *cpu, int n)
+{
+    cpu_generic_init_state(cpu, n ? "stopped" : "running");
+
+    PUSH(n);
     fword("encode-int");
     push_str("reg");
     fword("property");
@@ -543,7 +557,33 @@ cpu_970_init(const struct cpudef *cpu)
     push_str("64-bit");
     fword("property");
 
+    if (machine_id == ARCH_POWERMAC7_3) {
+        /* Mac OS X's MacRISC4CPU starts CPU n by pulsing this GPIO, and
+           fails to start any CPU without it when there are two */
+        PUSH(POWERMAC7_3_SOFT_RESET_GPIO + n);
+        fword("encode-int");
+        push_str("soft-reset");
+        fword("property");
+    }
+
     fword("finish-device");
+}
+
+static void
+cpu_970_init(const struct cpudef *cpu)
+{
+    int n, ncpus;
+
+    cpu_970_add_node(cpu, 0);
+
+    /* The powermac7_3 describes every CPU QEMU gives it; mac99 only the
+       one OpenBIOS runs on. QEMU writes the count as 16 bits. */
+    if (machine_id == ARCH_POWERMAC7_3) {
+        ncpus = fw_cfg_read_i16(FW_CFG_NB_CPUS);
+        for (n = 1; n < ncpus; n++) {
+            cpu_970_add_node(cpu, n);
+        }
+    }
 
 #ifdef CONFIG_PPC_64BITSUPPORT
     /* The 970 is a PPC64 CPU, so we need to activate
@@ -1088,7 +1128,7 @@ arch_of_init(void)
     temp = fw_cfg_read_i32(FW_CFG_ID);
     printk(" version %d machine id %d\n", temp, machine_id);
 
-    temp = fw_cfg_read_i32(FW_CFG_NB_CPUS);
+    temp = fw_cfg_read_i16(FW_CFG_NB_CPUS);
 
     printk("CPUs: %x\n", temp);
 
@@ -1247,12 +1287,15 @@ arch_of_init(void)
     node_methods_init(buf);
 
     if (machine_id == ARCH_POWERMAC7_3) {
-        /* As on the real PowerMac7,3, the cpu node names its interrupt
+        /* As on the real PowerMac7,3, each cpu node names its interrupt
            controller, the MPIC, by phandle */
         phandle_t mpic = dt_iterate_type(0, "open-pic");
+        phandle_t ph = 0;
 
         if (mpic) {
-            set_int_property(find_dev(buf), "AAPL,parentIC", mpic);
+            while ((ph = dt_iterate_type(ph, "cpu"))) {
+                set_int_property(ph, "AAPL,parentIC", mpic);
+            }
         }
     }
 

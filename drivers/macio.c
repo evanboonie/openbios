@@ -856,6 +856,48 @@ ob_unin_init(void)
         fword("finish-device");
 }
 
+/* The K2 GPIO that QEMU's powermac7_3 wires to every CPU's TBEN
+ * (qemu-g5#78), as an offset in the gpio node's block. Mac OS X's
+ * MacRISC4CPU freezes the timebases through it while it copies CPU 0's
+ * timebase to another CPU. */
+#define POWERMAC7_3_TIMEBASE_ENABLE_GPIO 0x27
+
+/* Builds the gpio node's timebase-enable child, with the platform-do
+ * function that AppleGPIO publishes as platform-cpu-timebase-<phandle of
+ * /cpus>, and points /cpus' platform-cpu-timebase at it. The encoding is the
+ * PCIe Power Mac G5's: on demand (0x08000000), write GPIO (1), with value 0
+ * and mask 4, so disabling drives the line low and enabling releases it.
+ * Mac OS X looks for platform-cpu-timebase on /cpus before any other way of
+ * syncing timebases, and, with no /u3/i2c pulsar either, starts only one
+ * CPU without one. */
+static void macio_timebase_enable_init(void)
+{
+    phandle_t cpus = find_dev("/cpus");
+    phandle_t ph;
+    u32 props[5];
+
+    fword("new-device");
+    push_str("timebase-enable");
+    fword("device-name");
+    push_str("gpio");
+    fword("device-type");
+
+    ph = get_cur_dev();
+    set_int_property(ph, "reg", POWERMAC7_3_TIMEBASE_ENABLE_GPIO);
+    set_property(ph, "compatible", "timebase-enable\0gpio", 21);
+
+    props[0] = __cpu_to_be32(cpus);
+    props[1] = __cpu_to_be32(0x08000000);
+    props[2] = __cpu_to_be32(1);
+    props[3] = __cpu_to_be32(0);
+    props[4] = __cpu_to_be32(4);
+    set_property(ph, "platform-do-cpu-timebase", (char *)props, sizeof(props));
+
+    fword("finish-device");
+
+    set_int_property(cpus, "platform-cpu-timebase", ph);
+}
+
 static void macio_gpio_init(const char *path)
 {
     fword("new-device");
@@ -929,6 +971,10 @@ static void macio_gpio_init(const char *path)
     push_str("interrupts");
     fword("property");
     fword("finish-device");
+
+    if (is_powermac7_3()) {
+        macio_timebase_enable_init();
+    }
 
     fword("finish-device");
 }
