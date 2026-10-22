@@ -1,3 +1,7 @@
 obj-*
 .stgit-*
 config-host.mak
+
+# Retro Lab working files: g5 and ofcon logs, and agents' drafts (evanboonie/retro-lab#199)
+/logs/
+/notes/
