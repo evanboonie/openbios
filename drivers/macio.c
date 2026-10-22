@@ -821,6 +821,45 @@ NODE_METHODS(ob_macio) = {
         { "dma-sync",		ob_macio_dma_sync		},
 };
 
+/*
+ * powermac7_3's DART (evanboonie/qemu-g5#89)
+ *
+ * QEMU's powermac7_3 sets FW_CFG_PPC_DART when it has U3's DART at
+ * 0xf8033000, in front of every device on the U3 bus (evanboonie/qemu-g5#84).
+ * Then /u3 gets a dart child, after the real PowerMac7,3's. Mac OS X's
+ * MacRISC4PE advertises a mapper when /u3/dart exists, and AppleDART matches
+ * the node by name, takes U3's register layout from "u3-dart", and turns the
+ * DART on, since Open Firmware leaves it off (read in AppleMacRISC4PE-204.0.9:
+ * MacRISC4PE.cpp:225-233, and AppleMacRiscPCI-3.4: AppleDART.cpp:273-274).
+ * The real node's claim-phys is left out: nothing in Mac OS X 10.5's or
+ * Linux's DART code reads it.
+ *
+ * Without the key, QEMU has no DART to translate the addresses AppleDART
+ * would hand out, so there's no node, as with the flash NVRAM's key.
+ */
+#define U3_DART_BASE    0xf8033000
+#define U3_DART_SIZE    0x7000
+
+static void u3_dart_init(void)
+{
+        phandle_t ph;
+        int props[2];
+
+        fword("new-device");
+        push_str("dart");
+        fword("device-name");
+        push_str("dart");
+        fword("device-type");
+
+        ph = get_cur_dev();
+        set_property(ph, "compatible", "u3-dart\0dart", 13);
+        props[0] = __cpu_to_be32(U3_DART_BASE);
+        props[1] = __cpu_to_be32(U3_DART_SIZE);
+        set_property(ph, "reg", (char *)&props, sizeof(props));
+
+        fword("finish-device");
+}
+
 void
 ob_unin_init(void)
 {
@@ -852,6 +891,26 @@ ob_unin_init(void)
         props[0] = __cpu_to_be32(0xf8000000);
         props[1] = __cpu_to_be32(0x1000000);
         set_property(dnode, "reg", (char *)&props, sizeof(props));
+
+        if (is_powermac7_3()) {
+                /* As on the real PowerMac7,3, a child's reg is one address
+                   cell and one size cell, and ranges maps U3's 256 MB at
+                   0xf8000000 one to one. Mac OS X takes 2 address cells
+                   where a parent gives none (IODeviceTreeSupport.cpp in
+                   xnu-1228.15.4) */
+                int ranges[3];
+
+                set_int_property(dnode, "#address-cells", 1);
+                set_int_property(dnode, "#size-cells", 1);
+                ranges[0] = __cpu_to_be32(0xf8000000);
+                ranges[1] = __cpu_to_be32(0xf8000000);
+                ranges[2] = __cpu_to_be32(0x10000000);
+                set_property(dnode, "ranges", (char *)&ranges, sizeof(ranges));
+
+                if (fw_cfg_read_i32(FW_CFG_PPC_DART)) {
+                        u3_dart_init();
+                }
+        }
 
         fword("finish-device");
 }

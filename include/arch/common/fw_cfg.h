@@ -48,6 +48,7 @@
 #define FW_CFG_PPC_BUSFREQ      (FW_CFG_ARCH_LOCAL + 0x09)
 #define FW_CFG_PPC_NVRAM_FLAT   (FW_CFG_ARCH_LOCAL + 0x0a)
 #define FW_CFG_PPC_VIACONFIG    (FW_CFG_ARCH_LOCAL + 0x0b)
+#define FW_CFG_PPC_DART         (FW_CFG_ARCH_LOCAL + 0x0c)
 
 #define FW_CFG_INVALID          0xffff
 
