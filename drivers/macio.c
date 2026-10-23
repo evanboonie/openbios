@@ -902,6 +902,9 @@ ob_unin_init(void)
 
                 set_int_property(dnode, "#address-cells", 1);
                 set_int_property(dnode, "#size-cells", 1);
+                /* The parent address is one cell, as the 32-bit build's root
+                   has (arch/ppc/qemu/tree.fs) and as /u3's reg assumes:
+                   CONFIG_PPC64 would need 2 */
                 ranges[0] = __cpu_to_be32(0xf8000000);
                 ranges[1] = __cpu_to_be32(0xf8000000);
                 ranges[2] = __cpu_to_be32(0x10000000);
