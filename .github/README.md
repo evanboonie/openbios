@@ -27,7 +27,10 @@ the other machines keep upstream's device tree, and get only the shared fixes be
 - **Its identity:** the machine ID gets an entry of its own, set up as `mac99`'s U3 one is. The root node's model
   is `PowerMac7,3`, and its compatible is `PowerMac7,3`, `MacRISC4`, `Power Macintosh`.
 - **U3:** the memory controller node is `u3` (compatible `u3`, model `AAPL,U3`, device-rev `0x35`), in place of
-  `uni-n`.
+  `uni-n`. It has one address cell and one size cell, and `ranges` maps its 256 MB at `0xf8000000` one to one.
+- **U3's DART:** when QEMU sets `FW_CFG_PPC_DART`, as its `powermac7_3` does once it has the DART, `/u3` has a `dart`
+  child (compatible `u3-dart`, `dart`, reg `0xf8033000`, `0x7000`), so Mac OS X's `AppleDART` turns the DART on and
+  maps DMA through it. Without the key there's no node, since there's no DART to translate.
 - **The PCI I/O range** of `u3-agp` is at `0xf0000000`, 8 MB, as on the real machine, where `mac99` has it at
   `0xf2000000`.
 - **The interrupt controller:** mac-io's is named `mpic`, and the cpu node's `AAPL,parentIC` points at it.
